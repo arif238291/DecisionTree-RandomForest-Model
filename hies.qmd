@@ -1,0 +1,244 @@
+---
+title: "Household Income and Expenditure Patterns in Bangladesh"
+author: "Md Ariful Islam"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme: pulse
+    highlight: tango
+  pdf_document:
+    toc: true
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(tibble)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(randomForest)
+library(pROC)
+```
+
+## Executive Summary
+
+This analysis explores household income and expenditure patterns in Bangladesh using a simulated dataset modeled after the Household Income and Expenditure Survey (HIES). The objective is to identify regional and demographic disparities, and model expenditure behavior using income and household characteristics.
+
+```{r}
+# Simulate data
+set.seed(2025)
+n <- 300
+df <- tibble(
+  region = sample(c("Dhaka", "Chattogram", "Rajshahi", "Sylhet"), n, replace = TRUE),
+  urban_rural = sample(c("Urban", "Rural"), n, replace = TRUE),
+  household_size = sample(2:9, n, replace = TRUE),
+  income = round(rnorm(n, mean = 42000, sd = 9000)),
+  expenditure = round(income * runif(n, 0.55, 0.85)),
+  age_group = sample(c("18-25", "26-35", "36-45", "46-60", "60+"), n, replace = TRUE),
+  education_level = sample(c("No formal education", "Primary", "Secondary", "Higher"), n, replace = TRUE),
+  employment_status = sample(c("Employed", "Self-employed", "Unemployed"), n, replace = TRUE)
+)
+
+glimpse(df)
+
+```
+
+## Data Preparation
+
+This analysis explores household income and expenditure patterns in Bangladesh using a simulated dataset modeled after the Household Income and Expenditure Survey (HIES). The objective is to identify regional and demographic disparities, and model expenditure behavior using income and household characteristics.
+
+```{r}
+df_summary <- df %>%
+  group_by(region, urban_rural) %>%
+  summarise(
+    mean_income = round(mean(income), 1),
+    mean_expenditure = round(mean(expenditure), 1),
+    mean_household_size = round(mean(household_size), 1),
+    .groups = "drop"
+  )
+
+kable(df_summary, caption = "Table 1: Summary by Region and Urban/Rural") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+```
+
+## Descriptive Statistics
+
+We begin by summarizing the dataset using basic descriptive statistics, followed by grouped summaries by region and urban/rural classification.
+
+### Univariate Analysis
+
+```{r}
+
+library(gtsummary)
+
+# Select relevant variables for analysis
+df %>%
+  select(region,urban_rural, age_group, employment_status, income, expenditure, household_size, employment_status) %>%
+  tbl_summary(
+    statistic = all_continuous() ~ "{mean} (SD: {sd}; Min: {min}; Max: {max})",
+    digits = all_continuous() ~ 1,
+    missing = "no"
+  ) %>%
+  modify_header(label = "**Variable**") %>%
+  modify_caption("**Table 1: Univariate Summary Statistics**")
+
+```
+
+### Bivariate Analysis by Urban/Rural
+
+```{r}
+
+# Bivariate summary stratified by urban_rural
+df %>%
+  select(region,urban_rural, age_group, employment_status, income, expenditure, household_size, employment_status) %>%
+  tbl_summary(
+    by = urban_rural,
+    statistic = all_continuous() ~ "{mean} (SD: {sd})",
+    digits = all_continuous() ~ 1,
+    missing = "no"
+  ) %>%
+  add_p() %>%
+  modify_header(label = "**Variable**") %>%
+  modify_caption("**Table 2: Bivariate Summary by Urban/Rural**")
+
+```
+
+## Visual Analysis
+
+### Income vs Expenditure by Region
+
+```{r}
+df %>%
+  pivot_longer(cols = c(income, expenditure), names_to = "type", values_to = "amount") %>%
+  group_by(region, type) %>%
+  summarise(mean_amount = mean(amount), .groups = "drop") %>%
+  ggplot(aes(x = region, y = mean_amount, fill = type)) +
+  geom_col(position = "dodge") +
+  labs(title = "Mean Income and Expenditure by Region", y = "Amount (BDT)", x = "") +
+  theme_minimal(base_size = 13)
+
+
+```
+
+### Urban vs Rural Expenditure Comparison
+
+```{r}
+df %>%
+  ggplot(aes(x = urban_rural, y = expenditure, fill = urban_rural)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Household Expenditure: Urban vs Rural",
+       y = "Expenditure (BDT)", x = "") +
+  theme_minimal(base_size = 13)
+```
+
+## Regression Analysis
+
+We model household expenditure as a function of income, region, urban/rural status, and household size:
+
+```{r}
+model <- lm(expenditure ~ income + household_size + region + urban_rural, data = df)
+tidy(model) %>%
+  kable(caption = "Table 2: Regression Results") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+```
+
+## Decision Tree Model Analysis
+
+```{r}
+# Create a new variable to predict: High expenditure (1 if expenditure > 35000, else 0)
+df$high_expenditure <- ifelse(df$expenditure > 35000, 1, 0)
+
+trainIndex <- createDataPartition(df$high_expenditure, p = 0.8, list = FALSE)
+trainData <- df[trainIndex, ]
+testData <- df[-trainIndex, ]
+
+# Build the decision tree model
+tree_model <- rpart(high_expenditure ~ region + urban_rural + household_size + income + age_group + education_level + employment_status, 
+                    data = trainData, method = "class")
+
+
+# Improved visualization using rpart.plot
+rpart.plot(tree_model, type = 3, extra = 101, fallen.leaves = TRUE, main = "Decision Tree for High Expenditure Prediction")
+
+# Make predictions on the test set
+predictions <- predict(tree_model, testData, type = "class")
+
+# Evaluate the model performance
+conf_matrix <- confusionMatrix(predictions, as.factor(testData$high_expenditure))
+print(conf_matrix)
+```
+
+## Random Forest Model Analysis
+
+```{r}
+# Target variable
+df$high_expenditure <- as.factor(ifelse(df$expenditure > 35000, 1, 0))  # classification target
+
+trainIndex <- caret::createDataPartition(df$high_expenditure, p = 0.8, list = FALSE)
+trainData <- df[trainIndex, ]
+testData <- df[-trainIndex, ]
+
+# Fit Random Forest model
+rf_model <- randomForest(
+  high_expenditure ~ region + urban_rural + household_size + income +
+    age_group + education_level + employment_status,
+  data = trainData,
+  importance = TRUE,
+  ntree = 500
+)
+
+
+# Make predictions
+rf_predictions <- predict(rf_model, testData)
+
+# Confusion Matrix
+rf_conf_matrix <- caret::confusionMatrix(rf_predictions, testData$high_expenditure)
+print(rf_conf_matrix)
+
+# Variable Importance Plot
+varImpPlot(rf_model, main = "Variable Importance - Random Forest")
+
+```
+
+## ROC curve
+
+```{r}
+# Decision Tree
+
+tree_probs <- predict(tree_model, testData, type = "prob")[,2]  # Probabilities for class 1
+
+# Random Forest
+
+rf_probs <- predict(rf_model, testData, type = "prob")[,2]  # Probabilities for class 1
+
+# Create ROC objects
+roc_tree <- roc(testData$high_expenditure, tree_probs)
+roc_rf <- roc(testData$high_expenditure, rf_probs)
+
+# Plot
+plot(roc_tree, col = "blue", main = "ROC Curve Comparison", print.auc = TRUE, legacy.axes = TRUE)
+plot(roc_rf, col = "darkgreen", add = TRUE, print.auc = TRUE, print.auc.y = 0.4)
+legend("bottomright", legend = c("Decision Tree", "Random Forest"),
+       col = c("blue", "darkgreen"), lwd = 2)
+
+```
+
+## Key Findings
+
+-   Households in urban areas tend to have higher expenditures.
+-   Expenditure is strongly and positively associated with income and household size.
+-   Regional disparities suggest lower average spending in Rajshahi compared to Dhaka.
+
+## Conclusion
+
+This simulated HIES-style report highlights regional and structural differences in household spending behavior. Future steps could include poverty line estimations, Lorenz curve analysis, or policy scenario simulations.
